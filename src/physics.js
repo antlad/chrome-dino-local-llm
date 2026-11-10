@@ -61,6 +61,14 @@ export class PhysicsWorld {
     this.shapePasses = options.shapePasses ?? 4;
     this.substeps = options.substeps ?? 2;
     this.groundY = options.groundY ?? 372;
+    // The deck is a treadmill, not a floor. A side-scroller holds the actor at a
+    // fixed screen x and moves the world past it, so the surface under the body
+    // is really travelling backwards at the scroll speed. Friction has to be
+    // measured against that moving surface or a released body drops straight down
+    // in place instead of being left behind, which is the single most visible
+    // tell of a ragdoll that is not really coupled to its world. The game writes
+    // this each tick; a bare world sits still.
+    this.groundVx = options.groundVx ?? 0;
     this.restitution = options.restitution ?? 0.16;
     this.friction = options.friction ?? 0.42;
     this.airDrag = options.airDrag ?? 0.0015;
@@ -194,8 +202,12 @@ export class PhysicsWorld {
       id: opts.id ?? `c${this.colliders.length}`,
       x: opts.x ?? 0,
       y: opts.y ?? 0,
-      vx: opts.vx ?? 0,
-      vy: opts.vy ?? 0,
+      // Velocity is *measured* from the collider's own motion, not declared by
+      // whoever moves it. See measureColliderVelocities().
+      vx: 0,
+      vy: 0,
+      xPrev: opts.x ?? 0,
+      yPrev: opts.y ?? 0,
       segments,
       enabled: opts.enabled ?? true,
       kind: opts.kind ?? 'obstacle',
@@ -203,6 +215,26 @@ export class PhysicsWorld {
     };
     this.colliders.push(col);
     return col;
+  }
+
+  /**
+   * Derive each collider's velocity from where it actually moved since the last
+   * tick. Handing the solver a velocity that the mover merely *claims* it has is
+   * a standing invitation to lie, and it did: once a run ended the world stopped
+   * scrolling but every cactus kept the `vx` it had at the moment of death, so
+   * stationary obstacles went on dragging the corpse across the deck and the
+   * body never quite settled. Measuring displacement makes that class of bug
+   * impossible: a collider that is not moving has no business shoving anything,
+   * whatever its owner says.
+   */
+  measureColliderVelocities(dt = 1) {
+    const h = dt > 0 ? dt : 1;
+    for (const col of this.colliders) {
+      col.vx = (col.x - col.xPrev) / h;
+      col.vy = (col.y - col.yPrev) / h;
+      col.xPrev = col.x;
+      col.yPrev = col.y;
+    }
   }
 
   removeCollider(col) {
@@ -262,6 +294,8 @@ export class PhysicsWorld {
         if (vy <= -restEps) p.resting = false;
         else grav = 0;
       }
+      p.vxArrive = vx;
+      p.vyArrive = vy;
       p.px = p.x;
       p.py = p.y;
       p.x += vx;
@@ -453,41 +487,68 @@ export class PhysicsWorld {
     const contactTol = 0.45;
     if (bottom <= this.groundY - contactTol) {
       p.resting = false;
+      // Leaving the deck ends the contact streak, so the next arrival is allowed to
+      // be treated as an impact again.
+      p.contactFrames = 0;
       return;
     }
-    if (bottom <= this.groundY) {
-      // Inside the contact band with no penetration: keep whatever resting state
-      // integrate decided, but make sure there is no downward velocity left.
-      return;
-    }
-
+    // In contact.
+    //
+    // The settle decision uses the *arrival* velocity captured in integrate, not
+    // `p.x - p.px`. collideGround runs inside the constraint loop, up to
+    // (iterations x shapePasses) times a tick, and every rod and angle pass that
+    // touches this particle rewrites px on its way to holding a bone length.
+    // Reading the difference mid-solve therefore measures solver chatter as if it
+    // were motion: a knee pinned to the deck under a heavy torso gets a fresh rod
+    // kick each iteration, never looks slow enough to be called settled, keeps
+    // 58% of that kick as real velocity, and creeps along the deck forever. The
+    // velocity the particle actually arrived at the deck with is the only honest
+    // answer to "is this thing still moving".
+    const vxArr = p.vxArrive ?? p.x - p.px;
+    const vyArr = p.vyArrive ?? p.y - p.py;
+    const restEps = this.gravity * (this.currentDt ?? 1) * 2;
     const pen = bottom - this.groundY;
 
-    // Read velocity from the *pre*-clamp positions: once y is snapped to the
-    // surface the penetration (and therefore the impact speed) is gone.
+    if (pen > 0) {
+      p.y = this.groundY - p.radius;
+      // Restitution only for a real downward hit. The threshold has to clear the
+      // velocity gravity itself adds in one tick: at 0.9 px/tick, a fixed 0.55
+      // cut-off meant every particle merely *resting* on the deck arrived each
+      // frame at exactly 0.9, qualified as an impact, and bounced. That is the
+      // limit cycle that kept a dead body buzzing at a constant energy forever.
+      //
+      // The second half of that rule matters just as much: a bounce is what happens
+      // at an *impact*, not at a contact that has been held for fifty ticks. A
+      // particle already in contact last tick is being pressed into the deck by
+      // whatever is on top of it, and answering a press with a bounce turns a
+      // settled elbow into a permanent pogo stick.
+      const impact = p.contactFrames > 0 ? 0 : vyArr > restEps ? p.groundRestitution : 0;
+      p.py = p.y + vyArr * impact;
+      this.stats.contacts += 1;
+    }
+    p.contactFrames = (p.contactFrames ?? 0) + 1;
+
+    // Tangential friction, expressed as a velocity multiplier, applied across the
+    // whole contact band rather than only to penetration. It used to live in the
+    // penetrating branch alone, so a limb that a bone constraint had lifted a
+    // hair off the deck skipped friction completely and slid along it without
+    // resistance. A particle that is essentially settled loses all tangential
+    // drift too, which is what lets a corpse stay where it landed.
+    //
+    // Decide from the arrival velocity, but damp the *live* one. Those have to be
+    // two different reads: re-applying px from the arrival figure on every
+    // iteration would hand back the velocity the rods had just taken away,
+    // eleven times a tick, turning friction into a motor.
+    //
+    // Friction is against the *deck*, and the deck moves. `rel` is the slip
+    // speed at the contact, which is what friction opposes; damping it toward zero
+    // means a body in contact is carried along with the surface until it matches,
+    // exactly as a real body dropped onto a treadmill is carried along.
+    const settled = Math.abs(vyArr) <= restEps && Math.abs(vxArr - this.groundVx) < 0.12;
     const vx = p.x - p.px;
-    const vy = p.y - p.py;
-
-    p.y = this.groundY - p.radius;
-
-    // Restitution only for a real downward hit. The threshold has to clear the
-    // velocity gravity itself adds in one tick: at 0.9 px/tick, a fixed 0.55
-    // cut-off meant every particle merely *resting* on the deck arrived each
-    // frame at exactly 0.9, qualified as an impact, and bounced. That is the
-    // limit cycle that kept a dead body buzzing at a constant energy forever.
-    const restEps = this.gravity * (this.currentDt ?? 1) * 2;
-    const e = vy > restEps ? p.groundRestitution : 0;
-    p.py = p.y + vy * e;
-
-    // Tangential friction, expressed as a velocity multiplier. A particle that
-    // is essentially settled loses all tangential drift too, so a corpse on the
-    // deck stays where it landed instead of creeping.
-    const settled = Math.abs(vy) <= restEps && Math.abs(vx) < 0.12;
     const keep = settled ? 0 : 1 - p.groundFriction;
-    p.px = p.x - vx * keep;
+    p.px = p.x - (this.groundVx + (vx - this.groundVx) * keep);
     p.resting = settled;
-
-    this.stats.contacts += pen > 0 ? 1 : 0;
   }
 
   collideColliders(p) {
@@ -599,8 +660,14 @@ export class PhysicsWorld {
   collide() {
     for (const p of this.particles) {
       if (p.invMass === 0) continue;
-      this.collideGround(p);
+      // Obstacles first, deck second. The other order was a standing limit cycle:
+      // a cactus base sits at ground level, so a foot wedged beside its bottom cap
+      // got pushed *through* the deck, the deck shoved it back up next, and the two
+      // traded blows eleven times a tick. A corpse buzzed at a constant energy
+      // forever and never reported settled. Last word goes to the deck because the
+      // deck is the one surface nothing may end a tick inside.
       this.collideColliders(p);
+      this.collideGround(p);
       this.collideBounds(p);
     }
   }
@@ -644,6 +711,9 @@ export class PhysicsWorld {
     const sub = Math.max(1, this.substeps | 0);
     const h = dt / sub;
     this.currentDt = h;
+    // Once per tick, before any substep: the displacement a mover applied this
+    // tick is the velocity its surfaces have for all of this tick.
+    this.measureColliderVelocities(dt);
     for (let s = 0; s < sub; s++) {
       this.integrate(h);
       this.solve();

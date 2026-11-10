@@ -130,6 +130,15 @@ const NEUTRAL = Object.fromEntries(
  */
 const POSTURES = {
   torso: { pivot: 'pelvis', tip: 'chest', stiffness: 0.34, lo: -0.55, hi: 0.55 },
+  // The neck is the free end of the spine, so it needs its own balance reflex.
+  // Without it nothing at all opposes gravity on `chest -> neck`: the relative
+  // neck motor is happy (it only measures the chest-neck-head bend, and a
+  // dangling neck still bends correctly at its vertex), and `headUp` can only
+  // rotate the head about the neck, which cannot lift a chain that has already
+  // folded at the shoulder. The result was the whole skull hanging under the
+  // chest, snout 11 px off the deck instead of 113 px, while every angle and
+  // bone in the body reported itself perfectly satisfied.
+  neckCarry: { pivot: 'chest', tip: 'neck', stiffness: 0.3, lo: -0.62, hi: 0.62 },
   headUp: { pivot: 'neck', tip: 'head', stiffness: 0.26, lo: -0.7, hi: 0.7 },
   tailCarry: { pivot: 'pelvis', tip: 'tail1', stiffness: 0.11, lo: -1.15, hi: 1.15 },
   legL: { pivot: 'pelvis', tip: 'kneeL', stiffness: 0.14, lo: -1.0, hi: 1.0 },
@@ -284,6 +293,29 @@ const DEAD_SPLAY = {
   shoulderR: 0.5,
 };
 
+/**
+ * How much wider each balance reflex opens once the body is dead, in radians.
+ *
+ * These have to widen, not just lose their target. A posture constraint has two
+ * half-engines: a motor toward `target` and a pair of limits that refuse to let
+ * the bone leave [lo, hi]. Zeroing the gain only silences the motor, so a corpse
+ * that rolled onto its back and pushed the spine 32 degrees off level was shoved
+ * straight back by the limit, every tick, forever. That reads as a body doing
+ * sit-ups, and it is also a permanent source of velocity: the limit pushed, the
+ * deck's friction resisted, and the imbalance walked the carcass along the deck
+ * at a third of a pixel per tick long after anything watching energy would call
+ * it still. Muscles let go of both halves of the reflex, not just the one that
+ * looks like a muscle.
+ */
+const POSTURE_SPLAY = {
+  torso: 1.3,
+  neckCarry: 1.3,
+  headUp: 1.3,
+  tailCarry: 1.4,
+  legL: 1.2,
+  legR: 1.2,
+};
+
 export class DinoRagdoll {
   /**
    * @param {PhysicsWorld} world
@@ -434,7 +466,15 @@ export class DinoRagdoll {
         gain: 1,
         group: name,
       });
-      this.postures[name] = w.postures[idx];
+      const post = w.postures[idx];
+      // Same reasoning as the joint arcs: a corpse must be able to leave the
+      // living range of a balance reflex, and revive has to be able to put it
+      // back. Kept on the constraint so one place owns the living limits.
+      post.loLive = post.lo;
+      post.hiLive = post.hi;
+      post.loDead = post.lo - (POSTURE_SPLAY[name] ?? 1.2);
+      post.hiDead = post.hi + (POSTURE_SPLAY[name] ?? 1.2);
+      this.postures[name] = post;
     }
   }
 
@@ -485,7 +525,11 @@ export class DinoRagdoll {
       ang.hi = ang.hiLive;
       ang.gain = 1;
     }
-    for (const post of Object.values(this.postures)) post.gain = 1;
+    for (const post of Object.values(this.postures)) {
+      post.gain = 1;
+      post.lo = post.loLive;
+      post.hi = post.hiLive;
+    }
     this.bob = 0;
     this.settled = false;
     this.place(x ?? this.homeX, this.standY());
@@ -644,11 +688,33 @@ export class DinoRagdoll {
     }
     // Flail: every limb gets a phase-dependent shove, so two deaths never look
     // identical without needing an RNG (and determinism stays intact).
+    //
+    // Neutralised afterwards, because "limbs thrashing about" is internal motion
+    // and must not move the centre of mass. Left raw, these eight shoves added a
+    // net linear momentum whose sign depends on the run phase, which meant a
+    // purely decorative effect decided whether the carcass ended up in front of
+    // or behind the cactus that killed it. The hit direction already comes from
+    // the impulse and the deformation above; this only redistributes limbs about
+    // the body they are attached to.
     let k = 0;
+    const flails = [];
     for (const name of ['armL', 'handL', 'armR', 'handR', 'footL', 'footR', 'tail3', 'snout']) {
       k++;
       const q = this.particle(name);
-      this.world.addVelocity(q, Math.sin(k * 1.7 + this.phase) * 1.1, Math.cos(k * 2.3) * 0.7);
+      flails.push([q, Math.sin(k * 1.7 + this.phase) * 1.1, Math.cos(k * 2.3) * 0.7]);
+    }
+    let px = 0;
+    let py = 0;
+    let mass = 0;
+    for (const [q, ax, ay] of flails) {
+      px += q.mass * ax;
+      py += q.mass * ay;
+      mass += q.mass;
+    }
+    if (mass > 0) {
+      const ux = px / mass;
+      const uy = py / mass;
+      for (const [q, ax, ay] of flails) this.world.addVelocity(q, ax - ux, ay - uy);
     }
     this.lastImpact = Math.hypot(vx, vy);
     return { vx, vy, omega, heightFactor };
@@ -891,6 +957,9 @@ export class DinoRagdoll {
     this.postures.torso.target = this.ducking ? 0.3 : clamp(this.speed * 0.008, 0, 0.1);
     this.postures.headUp.target = this.ducking ? 0.28 : clamp(-this.speed * 0.006, -0.08, 0);
     this.postures.tailCarry.target = this.ducking ? -0.5 : -0.04;
+    // A crouch has to fold the neck with everything else, or the skull stays up
+    // at 118 px and the duck loses the only height reduction that matters.
+    this.postures.neckCarry.target = this.ducking ? 0.5 : clamp(-this.speed * 0.004, -0.06, 0);
     this.postures.legL.target = 0;
     this.postures.legR.target = 0;
 
@@ -921,11 +990,14 @@ export class DinoRagdoll {
       ang.lo = ang.loLive - widen * splay;
       ang.hi = ang.hiLive + widen * splay;
     }
-    // The balance reflex goes limp with everything else. If it stayed on, the
-    // corpse would right itself like a rattleback, which is not a death.
+    // The balance reflex goes limp completely. Zeroing the gain alone is not
+    // enough: see POSTURE_SPLAY for what the limits alone will do to a body that
+    // is supposed to be dead.
     for (const post of Object.values(this.postures)) {
       post.gain = this.muscle;
       post.target = lerp(post.target, 0, 0.2 * dt);
+      post.lo = post.loLive - (post.loLive - post.loDead) * splay;
+      post.hi = post.hiLive + (post.hiDead - post.hiLive) * splay;
     }
     // Settle detection: once the whole body has been slow for a spell, the run
     // is properly over. Latched, because kinetic energy wobbles frame to frame
@@ -1020,5 +1092,6 @@ export class DinoRagdoll {
   }
 }
 
-export { SKELETON, BONES, BRACES, JOINTS, NEUTRAL, POSTURES };
+export { SKELETON, BONES, BRACES, JOINTS, NEUTRAL, POSTURES, POSTURE_SPLAY };
+export { LIMP, DEAD_SPLAY };
 export { PhysicsWorld };

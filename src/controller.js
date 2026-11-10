@@ -131,6 +131,11 @@ export class Controller {
    */
   async step(ticks = 1, opts = {}) {
     const n = Math.max(0, Math.min(opts.limit ?? 200000, ticks | 0));
+    // With autopilot on, stepping implies wanting a run. Without this, the
+    // documented `controller.setAuto(true); controller.step(1200)` would sit on
+    // the title screen burning ticks, which reads as the autopilot being broken
+    // when it is the state machine that was never left.
+    if (this.auto && this.game.state === 'ready') this.game.start();
     for (let i = 0; i < n; i++) {
       // Drain first: a press() between frames still lands on a tick boundary,
       // which is what lets a recorded input sequence replay exactly.

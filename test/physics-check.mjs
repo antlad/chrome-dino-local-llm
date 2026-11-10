@@ -7,7 +7,7 @@
 // stand-in, so a number that looks right here looks right on screen.
 
 import { PhysicsWorld, angleAt, wrapAngle } from '../src/physics.js';
-import { DinoRagdoll, SKELETON, NEUTRAL } from '../src/ragdoll.js';
+import { DinoRagdoll, SKELETON, NEUTRAL, DEAD_SPLAY } from '../src/ragdoll.js';
 
 const GROUND = 372;
 
@@ -117,15 +117,30 @@ function probeStand() {
   for (let i = 0; i < 120; i++) dino.update(1, { speed: 0 });
   const ext = bodyExtent(dino);
   const err = poseError(dino);
+  // The head must clear the shoulders, not merely clear some pixel count. When
+  // the neck had no balance reflex the whole skull hung under the chest and the
+  // body stood 92 px tall with a perfect skeleton: every joint at target, every
+  // bone at rest length, and a dino shaped like a question mark. A height floor
+  // of 120 passed exactly because nothing was holding the head up, so this now
+  // asserts the thing that actually matters: the skull is the top of the body.
+  const headTop = GROUND - (dino.particle('head').y - dino.particle('head').radius);
+  const chestTop = GROUND - (dino.particle('chest').y - dino.particle('chest').radius);
+  const shoulderHeight = Math.max(headTop, chestTop);
   return {
     name: 'stand idle',
-    ok: err.avg < 12 && ext.bottom > GROUND - 3 && ext.top > GROUND - 120,
+    ok:
+      err.avg < 12 &&
+      ext.bottom > GROUND - 3 &&
+      headTop > chestTop + 18 &&
+      shoulderHeight > 110 &&
+      err.worst < 20,
     checks: [
       ['pose err avg (deg)', err.avg.toFixed(1)],
       ['pose err worst (deg)', err.worst.toFixed(1)],
       ['height (px)', ext.height.toFixed(1)],
       ['bottom vs ground', (GROUND - ext.bottom).toFixed(1)],
-      ['head top', (GROUND - ext.top).toFixed(1)],
+      ['head top', headTop.toFixed(1)],
+      ['head above chest', (headTop - chestTop).toFixed(1)],
       ['width', ext.width.toFixed(1)],
     ],
   };
@@ -218,39 +233,105 @@ function probeDuck() {
   };
 }
 
-function probeDeathTumble() {
+/**
+ * Control for the death probes: un-pin the root and cut every muscle with no
+ * pop, no shove and no torque, so the only thing acting on the body is gravity.
+ * A corpse that tumbles *because it was hit* has to beat this on rotation.
+ * Without a control, `comPath > 120` just measured how far a body falls, which
+ * a limp drop also passes: the old constant was satisfied by a corpse that went
+ * nowhere but down.
+ */
+function limpDropReference(speed = 8) {
   const { world, dino } = makeDino();
-  for (let i = 0; i < 60; i++) dino.update(1, { speed: 8 });
-  dino.die({ dir: -1, speed: 8, height: 0.2, x: dino.frontX() });
-  const origin = () => dino.comAtDeath;
+  for (let i = 0; i < 60; i++) dino.update(1, { speed });
+  const root = dino.pelvis();
+  root.invMass = 1 / SKELETON.pelvis.mass;
+  root.pinned = false;
+  dino.alive = false;
+  dino.muscle = 0;
+  for (const ang of Object.values(dino.joints)) {
+    ang.gain = 0;
+    // A corpse that is being compared against has to be allowed the same freedom
+    // a real corpse has. Leaving the living joint and posture limits clamped here
+    // would cripple the control and make any struck body look good by comparison,
+    // which is the easiest way to write a probe that can never fail.
+    ang.lo = ang.loLive - (DEAD_SPLAY[ang.group] ?? 0.5);
+    ang.hi = ang.hiLive + (DEAD_SPLAY[ang.group] ?? 0.5);
+  }
+  for (const post of Object.values(dino.postures)) {
+    post.gain = 0;
+    post.lo = post.loDead;
+    post.hi = post.hiDead;
+  }
+  const origin = world.centerOfMass();
   let maxSpin = 0;
-  let airborneTicks = 0;
-  let comPath = 0;
-  let prev = world.centerOfMass();
+  const startX = origin.x;
+  let prev = origin;
   for (let i = 0; i < 300; i++) {
     dino.update(1, { speed: 0 });
-    maxSpin = Math.max(maxSpin, Math.abs(world.angularMomentum(origin())));
+    maxSpin = Math.max(maxSpin, Math.abs(world.angularMomentum(origin)));
+    prev = world.centerOfMass();
+  }
+  return { maxSpin, dx: prev.x - startX };
+}
+
+/** Same run-up and death as the probe, for A/B comparison of one cause field. */
+function corpseOutcome(cause) {
+  const { world, dino } = makeDino();
+  for (let i = 0; i < 60; i++) dino.update(1, { speed: 8 });
+  dino.die(cause);
+  const origin = dino.comAtDeath;
+  let maxSpin = 0;
+  let comPath = 0;
+  let prev = world.centerOfMass();
+  const startX = prev.x;
+  for (let i = 0; i < 300; i++) {
+    dino.update(1, { speed: 0 });
+    maxSpin = Math.max(maxSpin, Math.abs(world.angularMomentum(origin)));
     const c = world.centerOfMass();
     comPath += Math.hypot(c.x - prev.x, c.y - prev.y);
     prev = c;
-    if (!dino.grounded) airborneTicks++;
   }
+  return { maxSpin, comPath, dx: prev.x - startX, world, dino };
+}
+
+function probeDeathTumble() {
+  const hit = { speed: 8, height: 0.2, x: 170 };
+  const struck = corpseOutcome({ ...hit, dir: -1 });
+  const { world, dino } = struck;
   const ext = bodyExtent(dino);
   const lim = limitReport(dino);
   const ke = world.totalKineticEnergy();
-  // A corpse that translates and rotates is a ragdoll. One that just falls
-  // straight down and lies flat is not.
+
+  // Two controls, because "the corpse moved" proves nothing by itself.
+  //
+  //   limp drop  - un-pinned with every motor cut and no impulse at all. Sets the
+  //                floor for how much rotation gravity and inherited run momentum
+  //                produce on their own. A hit has to clear it, or the collision
+  //                contributed nothing.
+  //   reversed   - identical except the horizontal shove points the other way.
+  //                This is the falsifiable one: if the hit is what drives the body,
+  //                reversing it has to reverse the outcome. A constant threshold on
+  //                net travel could not tell those apart, and the old one passed
+  //                whether the body was struck or simply dropped.
+  const control = limpDropReference();
+  const reversed = corpseOutcome({ ...hit, dir: 1 });
+
   return {
     name: 'death tumble',
     ok:
-      maxSpin > 20 &&
-      comPath > 120 &&
+      struck.maxSpin > control.maxSpin * 1.5 &&
+      reversed.dx > struck.dx + 20 &&
       ke < 0.5 &&
       ext.bottom > GROUND - 6 &&
       lim.violations === 0,
     checks: [
-      ['peak angular momentum', maxSpin.toFixed(1)],
-      ['com travel (px)', comPath.toFixed(0)],
+      ['peak angular momentum', struck.maxSpin.toFixed(1)],
+      ['  limp control', control.maxSpin.toFixed(1)],
+      ['com net dx (px)', struck.dx.toFixed(0)],
+      ['  limp control dx', control.dx.toFixed(0)],
+      ['  reversed shove dx', reversed.dx.toFixed(0)],
+      ['com travel (px)', struck.comPath.toFixed(0)],
       ['final KE', ke.toFixed(4)],
       ['settled', !!dino.settled],
       ['resting height', ext.height.toFixed(1)],

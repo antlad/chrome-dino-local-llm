@@ -29,6 +29,12 @@ export const CONFIG = {
   nightEvery: 1400, // ticks of running before the lights go down
   nightLength: 900,
   deathSettleTicks: 46, // how long the corpse tumbles before the game is over
+  // The deck is a treadmill, so when the runner dies the ground does not carry on
+  // beneath the body: it brakes, the way the original stops scrolling on a crash.
+  // This is a deceleration in px/tick^2, tuned so the belt is still within about
+  // 0.2s. A corpse is dragged by whatever the belt is doing, so the belt has to
+  // stop, and the brief slide while it does is the skid you see on impact.
+  deckBrake: 1.2,
 };
 
 export class Game {
@@ -52,6 +58,10 @@ export class Game {
     this.runTicks = 0;
     this.deathTick = -1;
     this.deathInfo = null;
+    // The deck is its own physical thing: a belt whose speed the world friction
+    // reads. It is owned here and nowhere else, and it is assigned on every branch
+    // of step() so a stale value can never outlive the scrolling that set it.
+    this.deckSpeed = 0;
     this.lastCause = null;
     this.obstaclesCleared = 0;
     this.input = { jump: false, duck: false, fastFall: false };
@@ -157,6 +167,13 @@ export class Game {
     if (this.auto && this.state === 'running') this.autopilot();
 
     const alive = this.state === 'running';
+    // One owner for the deck's speed, set before anything can step the body.
+    // This was previously implied by whichever call happened to move the
+    // obstacles, and the first version of it leaked: scrolling stopped at game
+    // over but the surface kept the speed it had at death, so a corpse slid
+    // forever on a floor that had visibly stopped. Assigning it here, per branch,
+    // means "not scrolling" and "scrolling at the old speed" cannot be confused.
+    let scroll = 0;
 
     if (alive) {
       this.tick += dt;
@@ -166,7 +183,9 @@ export class Game {
       this.score = Math.floor((this.distance / 100) * this.cfg.scorePer100px);
 
       this.updateNight();
-      this.field.update(dt, this.speed);
+      scroll = this.deckSpeed = this.speed;
+      this.world.groundVx = -scroll;
+      this.field.update(dt, scroll);
 
       const intent = {
         speed: this.speed,
@@ -194,11 +213,17 @@ export class Game {
     }
 
     if (this.state === 'dead') {
-      // The world keeps scrolling while the corpse tumbles, exactly as the
-      // original keeps the ground moving under the killed dino. The body is
-      // stepped with zero intent: no muscles, no goals, no steering.
+      // The belt brakes to a stop, the way the original freezes the world on a
+      // crash. That is not decoration: friction pulls a body toward whatever the
+      // surface under it is doing, so a belt that kept running would tow the corpse
+      // off screen no matter how well the body itself settled. While the belt is
+      // still moving the corpse skids backwards, which is the slide you want to
+      // see, and then the belt is still and the body is free.
       this.tick += dt;
-      this.field.update(dt, this.speed * 0.35);
+      this.deckSpeed = Math.max(0, this.deckSpeed - this.cfg.deckBrake * dt);
+      scroll = this.deckSpeed;
+      this.world.groundVx = -scroll;
+      this.field.update(dt, scroll);
       this.dino.update(dt, { speed: 0 });
       const forTicks = this.tick - this.deathTick;
       if (forTicks > this.cfg.deathSettleTicks && (this.dino.settled || forTicks > 200)) {
@@ -212,6 +237,8 @@ export class Game {
     // but the body keeps being stepped: a body that stopped mid-fall because a
     // state flag flipped would be the one visible lie in the whole simulation.
     this.tick += dt;
+    this.deckSpeed = 0;
+    this.world.groundVx = -scroll;
     this.dino.update(dt, { speed: 0 });
     return this;
   }
