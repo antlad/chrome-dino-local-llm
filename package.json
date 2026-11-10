@@ -1,0 +1,18 @@
+{
+  "name": "chrome-dino-ragdoll",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Chrome T-Rex runner, rebuilt from scratch with a real ragdoll dino (position-based dynamics, no dependencies).",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "test": "node --test test/",
+    "physics": "node test/physics-check.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

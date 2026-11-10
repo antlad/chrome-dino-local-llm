@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ragdoll T-Rex</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="bar">
+        <h1>Ragdoll&nbsp;T-Rex</h1>
+        <div class="hud" id="hud">
+          <span class="hud__mode" id="hud-mode">CRASHED</span>
+          <span class="hud__hi" id="hud-hi">HI 00000</span>
+          <span class="hud__score" id="hud-score">00000</span>
+        </div>
+      </header>
+
+      <div class="stage">
+        <canvas id="game" width="1200" height="432" aria-label="Ragdoll T-Rex runner game"></canvas>
+        <p class="hint" id="hint">
+          <b>space</b> jump &middot; <b>&darr;</b> duck &middot; <b>&uarr;</b> fast fall &middot;
+          <b>R</b> restart &middot; <b>P</b> pause &middot; <b>T</b> autopilot &middot; <b>X</b> ragdoll test
+        </p>
+      </div>
+
+      <section class="panel" id="panel">
+        <p class="panel__note">
+          Everything runs locally with zero dependencies. The dino is a position-based-dynamics
+          skeleton: 13 particles, 22 distance constraints, 11 angle constraints, motor-driven
+          joint targets, and a dead state where every muscle goes limp and the body tumbles.
+          Because the module publishes <code>game.controller</code>, an LLM or a script can drive it too:
+        </p>
+        <pre class="panel__code"><code>game.controller.press('jump')
+game.controller.setAuto(true)
+await game.controller.step(120)      // headless, fixed-step
+game.getState()                       // { score, state, dino: { pose, ... } }</code></pre>
+      </section>
+    </main>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
