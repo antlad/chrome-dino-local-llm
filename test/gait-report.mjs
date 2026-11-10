@@ -16,15 +16,45 @@ game.start();
 for (let i = 0; i < 120; i++) game.step(1);
 
 // Track the limbs over a window so stride comes from motion, not one frame.
+//
+// Two things are measured separately on purpose.
+//
+// `bob` and `lift` only count ticks with both feet eligible to be on the deck,
+// i.e. not a jump. Folding airborne ticks into "head bob" produced 74 px of
+// so-called gait bounce, which was really the autopilot clearing a pterodactyl.
+// A gait instrument that cannot tell a stride from a jump is not tuning anything.
+//
+// Stride is measured in *deck* coordinates. The deck is a treadmill, so a foot
+// that is correctly planted is standing still relative to the surface and moving
+// left at the scroll speed in screen terms. Measuring stride in screen space makes
+// a perfect stance look like a 90 px skid and a skating foot look stationary.
 const track = new Map();
+let groundedTicks = 0;
+let deckTravel = 0;
 for (let i = 0; i < ticks; i++) {
   game.step(1);
+  const airborne = !!game.dino.airborne;
+  if (!airborne) groundedTicks++;
+  deckTravel += game.deckSpeed;
   for (const q of game.world.particles) {
     if (!q.id.startsWith('dino:')) continue;
-    const rec = track.get(q.id) ?? { min: Infinity, max: -Infinity, high: -Infinity };
+    const rec =
+      track.get(q.id) ??
+      { min: Infinity, max: -Infinity, high: -Infinity, gMinY: Infinity, gMaxY: -Infinity, dxMin: Infinity, dxMax: -Infinity };
     rec.min = Math.min(rec.min, q.x);
     rec.max = Math.max(rec.max, q.x);
     rec.high = Math.max(rec.high, game.cfg.groundY - q.y);
+    if (!airborne) {
+      rec.gMinY = Math.min(rec.gMinY, q.y);
+      rec.gMaxY = Math.max(rec.gMaxY, q.y);
+      // Deck-relative x: undo the belt's travel since the window opened. A foot
+      // that is properly planted barely moves under this measure; a skating one
+      // sweeps the whole range. Screen-space travel cannot tell those apart, since
+      // on a treadmill a planted foot moves left at the scroll speed.
+      const relX = q.x + deckTravel;
+      rec.dxMin = Math.min(rec.dxMin, relX);
+      rec.dxMax = Math.max(rec.dxMax, relX);
+    }
     track.set(q.id, rec);
   }
 }
@@ -38,6 +68,22 @@ const h = (id) => (G - P[id].y).toFixed(1);
 const travel = (id) => {
   const t = track.get(`dino:${id}`);
   return t ? (t.max - t.min).toFixed(1) : 'n/a';
+};
+// Vertical range across grounded ticks only, which is what "bob" means.
+const bob = (id) => {
+  const t = track.get(`dino:${id}`);
+  return t && Number.isFinite(t.gMinY) ? (t.gMaxY - t.gMinY).toFixed(1) : 'n/a';
+};
+// Foot height range while grounded: how high the knee actually lifts a foot off
+// the deck in a stride, with no jump padding it out.
+const lift = (id) => {
+  const t = track.get(`dino:${id}`);
+  return t && Number.isFinite(t.gMinY) ? (G - t.gMinY).toFixed(1) : 'n/a';
+};
+// How far a foot slides across the deck while it is down. Low means grip.
+const slip = (id) => {
+  const t = track.get(`dino:${id}`);
+  return t && Number.isFinite(t.dxMin) ? (t.dxMax - t.dxMin).toFixed(1) : 'n/a';
 };
 // Signed angle of the a->b segment, so a limb pointing forward-and-down is
 // readable at a glance without cross-referencing the skeleton layout.
@@ -59,11 +105,14 @@ const rows = [
   ['hand height', h('handL')],
   ['knee height', h('kneeL')],
   ['foot height (0=deck)', `${h('footL')} / ${h('footR')}`],
-  ['foot travel (stride)', `${travel('footL')} / ${travel('footR')} px`],
-  ['foot peak lift', `${track.get('dino:footL')?.high.toFixed(1)} px`],
+  ['foot travel (screen)', `${travel('footL')} / ${travel('footR')} px`],
+  ['foot peak lift (gait)', `${lift('footL')} / ${lift('footR')} px`],
+  ['foot slip on deck', `${slip('footL')} / ${slip('footR')} px`],
   ['hand travel', `${travel('handL')} / ${travel('handR')} px`],
-  ['head bob', `${travel('head')} px`],
-  ['pelvis bob', `${travel('pelvis')} px`],
+  ['head bob (gait)', `${bob('head')} px`],
+  ['pelvis bob (gait)', `${bob('pelvis')} px`],
+  ['deck travelled', deckTravel.toFixed(0) + ' px'],
+  ['grounded ticks', `${groundedTicks}/${ticks}`],
   ['thigh L / R', `${limb('pelvis', 'kneeL')} / ${limb('pelvis', 'kneeR')}`],
   ['shin L / R', `${limb('kneeL', 'footL')} / ${limb('kneeR', 'footR')}`],
   ['arm L / R', `${limb('chest', 'armL')} / ${limb('chest', 'armR')}`],

@@ -810,10 +810,18 @@ export class DinoRagdoll {
       const swinging = p >= Math.PI;
 
       if (!swinging) {
-        // Stance: foot travels backwards at exactly deck speed, so it does not
-        // skate. It also sinks a little through mid-stance as the body weight
-        // arrives, then lifts at toe-off.
-        const rel = (u - 0.5) * stride;
+        // Stance: the foot is on the deck, and the deck is a treadmill moving
+        // backwards under the body. So a foot that is genuinely planted has to
+        // travel backwards at the scroll speed, which over a half stride is
+        // exactly one stride length. It used to be written the other way round
+        // (foot swept forwards through stance), which is the sign error that made
+        // the dino skate: held in the air at a fixed screen x while the belt
+        // slid out from under it, so every footfall was a ski jump.
+        //
+        // The hip is pinned at homeX in screen space, so the whole gait has to be
+        // expressed as the foot moving relative to a fixed body. Take off behind
+        // the hip, land ahead of it, and in between ride the deck backwards.
+        const rel = (0.5 - u) * stride;
         const tx = this.homeX + rel;
         const sink = Math.sin(u * Math.PI) * 3;
         const ty = deckY + sink;
