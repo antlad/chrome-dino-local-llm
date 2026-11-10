@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
+    "restart": "pkill -f 'node [s]erver.mjs' ; sleep 0.3 ; node server.mjs",
     "test": "node --test test/",
     "physics": "node test/physics-check.mjs"
   },
