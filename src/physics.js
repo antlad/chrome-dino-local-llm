@@ -552,8 +552,20 @@ export class PhysicsWorld {
   }
 
   collideColliders(p) {
+    // A bounce belongs to an impact, not to a contact that has been held open by
+    // the weight of everything above it. This is the same rule the deck applies,
+    // and it was missing here: a corpse draped over a cactus arm was pressed into
+    // it by gravity every tick, the code read each press as an approach, killed the
+    // normal velocity and added 12% back, and the limb pogoed on the arm forever at
+    // a constant energy. Per collider, because a body can be resting on one obstacle
+    // while striking a second one.
+    const streak = (p.colliderStreak ??= {});
     for (const col of this.colliders) {
-      if (!col.enabled) continue;
+      if (!col.enabled) {
+        streak[col.id] = 0;
+        continue;
+      }
+      let touching = false;
       for (const s of col.segments) {
         const ax = col.x + s.x1;
         const ay = col.y + s.y1;
@@ -565,6 +577,7 @@ export class PhysicsWorld {
         let dy = p.y - qy;
         let d = Math.hypot(dx, dy);
         if (d >= reach) continue;
+        touching = true;
         if (d < 1e-6) {
           // Centre is exactly on the segment: eject along the segment normal.
           const sx = bx - ax;
@@ -586,8 +599,10 @@ export class PhysicsWorld {
         const relVy = p.y - p.py - col.vy;
         const vn = relVx * nx + relVy * ny;
         if (vn < 0) {
-          // Kill the approach velocity along the normal, plus a little bounce.
-          const e = 0.12;
+          // Kill the approach velocity along the normal, plus a little bounce on
+          // the tick the contact first opens. Killing it is right every tick; the
+          // bounce is not, which is what kept a settled limb bouncing.
+          const e = streak[col.id] > 0 ? 0 : 0.12;
           p.px += nx * vn * (1 + e);
           p.py += ny * vn * (1 + e);
         }
@@ -605,6 +620,7 @@ export class PhysicsWorld {
         p.py += ty * tangent * drag;
         this.stats.contacts += 1;
       }
+      streak[col.id] = touching ? (streak[col.id] ?? 0) + 1 : 0;
     }
   }
 

@@ -8,6 +8,7 @@
 
 import { PhysicsWorld, angleAt, wrapAngle } from '../src/physics.js';
 import { DinoRagdoll, SKELETON, NEUTRAL, DEAD_SPLAY } from '../src/ragdoll.js';
+import { cactusCluster } from '../src/shapes.js';
 
 const GROUND = 372;
 
@@ -484,6 +485,99 @@ function probeNeutralSanity() {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * The corpse has to come to rest *against* an obstacle too, not just on clear
+ * deck. This is the case that hid a limit cycle: a cactus base sits at ground
+ * level, so a limb that wedged in beside its bottom cap was pushed sideways and
+ * down by the capsule and straight back up by the deck, eleven times a tick,
+ * forever. Every probe that only dropped the body on open floor passed while a
+ * corpse leaning on a cactus buzzed at a constant energy and never reported
+ * settled.
+ *
+ * The cactus arrives the way one does in a run: scrolling in from the right while
+ * the body tumbles, rather than materialising inside a body that had already come
+ * to rest. The second version jams the solver with an overlap it is never asked to
+ * resolve in anger, and ends up measuring that instead of the thing under test.
+ *
+ * Asserting on energy and the settle flag, rather than on a pose, is deliberate:
+ * where the body ends up depends on the contact, but whether it ever stops moving
+ * does not.
+ */
+function probeCorpseOnObstacle() {
+  const { world, dino } = makeDino();
+  for (let i = 0; i < 60; i++) dino.update(1, { speed: 8 });
+  const root = dino.pelvis();
+  root.invMass = 1 / SKELETON.pelvis.mass;
+  root.pinned = false;
+  dino.alive = false;
+  dino.muscle = 0;
+  dino.die({ dir: -1, speed: 8, height: 0.25, x: dino.frontX() });
+
+  const col = world.addCollider({
+    id: 'probe-cactus',
+    x: dino.frontX() + 120,
+    y: GROUND,
+    segments: cactusCluster(1, false).segments,
+  });
+
+  const SCROLL = 6;
+  let buzzTicks = 0;
+  let lastKe = 0;
+  let contactTick = -1;
+  for (let i = 0; i < 500; i++) {
+    // The cactus scrolls in until the body meets it, then stays put, the way the
+    // world stops once a run is over. Whether a body can *stop* is the question
+    // here; whether it can keep up with a moving surface is asked elsewhere.
+    // Moved before the step, with a velocity the solver measures from the actual
+    // movement, exactly as the obstacle field does.
+    if (contactTick < 0) {
+      col.x -= SCROLL;
+      world.measureColliderVelocities(1);
+    }
+    dino.update(1, { speed: 0 });
+    lastKe = world.totalKineticEnergy();
+    if (lastKe > 0.25) buzzTicks++;
+    if (contactTick < 0) {
+      for (const s of col.segments) {
+        const ax = col.x + s.x1;
+        const ay = col.y + s.y1;
+        const bx = col.x + s.x2;
+        const by = col.y + s.y2;
+        const sx = bx - ax;
+        const sy = by - ay;
+        const l2 = sx * sx + sy * sy || 1;
+        for (const p of dino.hitParticles()) {
+          const t = Math.max(0, Math.min(1, ((p.x - ax) * sx + (p.y - ay) * sy) / l2));
+          if (Math.hypot(p.x - (ax + sx * t), p.y - (ay + sy * t)) < p.radius + s.r) {
+            contactTick = i;
+          }
+        }
+      }
+    }
+  }
+  const ext = bodyExtent(dino);
+  const lim = limitReport(dino);
+  return {
+    name: 'corpse settles against an obstacle',
+    ok:
+      contactTick >= 0 &&
+      buzzTicks < 150 &&
+      lastKe < 0.25 &&
+      dino.settled &&
+      ext.bottom > GROUND - 6 &&
+      lim.violations === 0,
+    checks: [
+      ['met the cactus at tick', contactTick],
+      ['ticks still moving', buzzTicks + '/500'],
+      ['final KE', lastKe.toFixed(5)],
+      ['settled', String(!!dino.settled)],
+      ['bottom vs ground', (GROUND - ext.bottom).toFixed(2)],
+      ['resting height', ext.height.toFixed(1)],
+      ['limit violations', lim.violations],
+    ],
+  };
+}
+
 const PROBES = [
   probeNeutralSanity,
   probeStand,
@@ -492,6 +586,7 @@ const PROBES = [
   probeDuck,
   probeDeathTumble,
   probeHeadHit,
+  probeCorpseOnObstacle,
   probeCactusShove,
   probeDeterminism,
   probeRevive,

@@ -280,10 +280,17 @@ test('hit test agrees with the colliders the solver uses', () => {
   assert.equal(field.hitTest(far), null, 'a body clear above it should not');
 });
 
-test('the corpse tumbles clear of where it died instead of dropping in place', () => {
+test('the corpse tumbles from the impact instead of dropping in place', () => {
   // A body that simply fell straight down and lay flat is the other obvious tell
   // of a fake ragdoll. Death hands the body to the solver with the run momentum
   // it had plus the impact impulse, and it has to travel and rotate from there.
+  //
+  // Which *way* it goes is deliberately not asserted here. The dino is running
+  // forward when it hits, so the corpse legitimately carries on past the cactus,
+  // and the honest test for direction is the reversed-shove control in
+  // physics-check.mjs, where the impulse is the only thing that differs between
+  // two otherwise identical bodies. A fixed "ends up behind the cactus" bound
+  // here was really a claim about the old conveyor-belt ground, not about the hit.
   const g = newGame(5);
   let guard = 0;
   while (g.state === 'running' && guard++ < 2000) g.step();
@@ -300,10 +307,88 @@ test('the corpse tumbles clear of where it died instead of dropping in place', (
     travel += Math.hypot(c.x - prev.x, c.y - prev.y);
     prev = c;
   }
-  const com = g.world.centerOfMass();
   assert.ok(travel > 60, `corpse should travel, measured ${travel.toFixed(0)} px`);
-  assert.ok(com.x < start.x, 'corpse should end up behind where it died');
   assert.ok(spin > 20, `corpse should rotate, peak angular momentum ${spin.toFixed(0)}`);
+
+  // And it has to come to rest inside the frame. A body that slides out of view
+  // is the same bug wearing a different hat, so it is caught on the spot.
+  for (let i = 0; i < 300; i++) g.step();
+  const ps = g.dino.hitParticles();
+  const left = Math.min(...ps.map((p) => p.x - p.radius));
+  const right = Math.max(...ps.map((p) => p.x + p.radius));
+  assert.ok(
+    left > 0 && right < g.cfg.width,
+    `corpse should stay on screen, measured ${left.toFixed(0)} .. ${right.toFixed(0)} of ${g.cfg.width}`
+  );
+});
+
+test('the deck brakes on death instead of towing the corpse away', () => {
+  // The deck is a treadmill: the runner holds a fixed screen x while the ground
+  // and obstacles scroll beneath. That makes the ground a moving surface, and
+  // friction pulls a body toward whatever the surface under it is doing, so a
+  // belt that carried on running after a crash would tow the corpse off the left
+  // of the screen forever, however well the body itself settled.
+  //
+  // The original freezes the world on a crash, so that is the contract: the deck
+  // comes to a stop, and once it has, the corpse stops with it.
+  const g = newGame(5);
+  let guard = 0;
+  while (g.state === 'running' && guard++ < 2000) g.step();
+  assert.ok(g.deckSpeed > 3, 'should have been running on a moving deck');
+
+  g.step();
+  assert.equal(g.state, 'dead');
+  let guard2 = 0;
+  while (g.deckSpeed > 0 && guard2++ < 400) g.step();
+  assert.equal(g.deckSpeed, 0, 'the deck should brake to a full stop');
+  assert.ok(guard2 < 120, `the deck should stop quickly, took ${guard2} ticks`);
+
+  // With the belt still, a long soak must not move the body. This is the exact
+  // regression: a stale ground velocity kept a "settled" corpse sliding.
+  //
+  // The soak starts a couple of seconds after the crash rather than immediately,
+  // because a body thrown off a moving belt genuinely does glide for a while, and
+  // measuring the glide as if it were creep would make this test fail for the
+  // wrong reason. What must not happen is motion that never ends.
+  for (let i = 0; i < 400; i++) g.step();
+  const before = g.world.centerOfMass();
+  for (let i = 0; i < 300; i++) g.step();
+  const after = g.world.centerOfMass();
+  const drift = Math.hypot(after.x - before.x, after.y - before.y);
+  assert.ok(
+    drift < 8,
+    `corpse should rest once the deck stops, drifted ${drift.toFixed(2)} px`
+  );
+  assert.ok(
+    g.world.totalKineticEnergy() < 0.6,
+    `corpse should be at rest, KE ${g.world.totalKineticEnergy().toFixed(4)}`
+  );
+});
+
+test('every corpse comes to rest, not just the convenient one', () => {
+  // A corpse that buzzes forever is the least obvious and most damaging failure
+  // this simulation can have: it looks settled on screen, keeps a limb twitching
+  // at a fixed energy indefinitely, and never reports `settled`. It is also
+  // contact dependent, so it only shows up for the deaths where a limb lands
+  // against an obstacle or another limb.
+  //
+  // Which is why this loops. The bug it caught lived for as long as it did behind
+  // a single-seed assertion on a corpse that happened to land on clear deck. Ten
+  // deaths, and three of them buzz.
+  const seeds = [...SEEDS, 13, 3, 5];
+  const failures = [];
+  for (const seed of seeds) {
+    const g = newGame(seed);
+    let guard = 0;
+    while (g.state === 'running' && guard++ < 2000) g.step();
+    assert.notEqual(g.state, 'running', `seed ${seed} never died`);
+    for (let i = 0; i < 600; i++) g.step();
+    const ke = g.world.totalKineticEnergy();
+    if (ke >= 0.25 || !g.dino.settled) {
+      failures.push(`seed ${seed}: KE ${ke.toFixed(3)}, settled ${g.dino.settled}`);
+    }
+  }
+  assert.deepEqual(failures, [], 'corpses still buzzing after 10 seconds');
 });
 
 test('spawn spacing never becomes impossible at top speed', () => {
