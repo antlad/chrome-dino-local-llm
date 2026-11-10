@@ -170,19 +170,33 @@ export class PhysicsWorld {
    * collider-local space; the group carries position + velocity.
    */
   addCollider(opts = {}) {
+    const segments = (opts.segments ?? []).map((s) => ({
+      x1: s.x1,
+      y1: s.y1,
+      x2: s.x2,
+      y2: s.y2,
+      r: s.r ?? 4,
+    }));
+    // A zero-length capsule is not a degenerate case to be tolerant about: the
+    // collision code divides by the segment length, so one slipped into an
+    // obstacle silently turns every particle that touches it into NaN and the
+    // body vanishes off the screen several frames later, far from the cause.
+    // Rejecting at the boundary puts the error where the bad data was made.
+    for (const s of segments) {
+      if (!Number.isFinite(s.x1) || !Number.isFinite(s.y1) || !Number.isFinite(s.x2) || !Number.isFinite(s.y2)) {
+        throw new Error(`collider ${opts.id ?? '?'} has a non-finite segment`);
+      }
+      if (Math.hypot(s.x2 - s.x1, s.y2 - s.y1) < 1e-4) {
+        throw new Error(`collider ${opts.id ?? '?'} has a zero-length segment at ${s.x1},${s.y1}`);
+      }
+    }
     const col = {
       id: opts.id ?? `c${this.colliders.length}`,
       x: opts.x ?? 0,
       y: opts.y ?? 0,
       vx: opts.vx ?? 0,
       vy: opts.vy ?? 0,
-      segments: (opts.segments ?? []).map((s) => ({
-        x1: s.x1,
-        y1: s.y1,
-        x2: s.x2,
-        y2: s.y2,
-        r: s.r ?? 4,
-      })),
+      segments,
       enabled: opts.enabled ?? true,
       kind: opts.kind ?? 'obstacle',
       data: opts.data ?? null,
